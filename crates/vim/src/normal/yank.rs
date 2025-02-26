@@ -58,18 +58,18 @@ impl Vim {
         self.update_editor(window, cx, |vim, editor, window, cx| {
             editor.transact(window, cx, |editor, window, cx| {
                 editor.set_clip_at_line_ends(false, cx);
-                let mut original_positions: HashMap<_, _> = Default::default();
+                let mut start_positions: HashMap<_, _> = Default::default();
                 editor.change_selections(None, window, cx, |s| {
                     s.move_with(|map, selection| {
-                        let original_position = (selection.head(), selection.goal);
                         object.expand_selection(map, selection, around);
-                        original_positions.insert(selection.id, original_position);
+                        let start_position = (selection.start, selection.goal);
+                        start_positions.insert(selection.id, start_position);
                     });
                 });
                 vim.yank_selections_content(editor, false, cx);
                 editor.change_selections(None, window, cx, |s| {
                     s.move_with(|_, selection| {
-                        let (head, goal) = original_positions.remove(&selection.id).unwrap();
+                        let (head, goal) = start_positions.remove(&selection.id).unwrap();
                         selection.collapse_to(head, goal);
                     });
                 });
@@ -162,13 +162,16 @@ impl Vim {
                 // that line, we will have expanded the start of the selection to ensure it
                 // contains a newline (so that delete works as expected). We undo that change
                 // here.
-                let is_last_line = linewise
-                    && end.row == buffer.max_row().0
-                    && buffer.max_point().column > 0
-                    && start.row < buffer.max_row().0
+                let max_point = buffer.max_point();
+                let should_adjust_start = linewise
+                    && end.row == max_point.row
+                    && max_point.column > 0
+                    && start.row < max_point.row
                     && start == Point::new(start.row, buffer.line_len(MultiBufferRow(start.row)));
+                let should_add_newline =
+                    should_adjust_start || (end == max_point && max_point.column > 0 && linewise);
 
-                if is_last_line {
+                if should_adjust_start {
                     start = Point::new(start.row + 1, 0);
                 }
 
@@ -179,13 +182,13 @@ impl Vim {
                 for chunk in buffer.text_for_range(start..end) {
                     text.push_str(chunk);
                 }
-                if is_last_line {
+                if should_add_newline {
                     text.push('\n');
                 }
                 clipboard_selections.push(ClipboardSelection {
                     len: text.len() - initial_len,
                     is_entire_line: linewise,
-                    first_line_indent: buffer.indent_size_for_line(MultiBufferRow(start.row)).len,
+                    start_column: start.column,
                 });
             }
         }

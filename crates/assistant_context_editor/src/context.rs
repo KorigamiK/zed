@@ -8,11 +8,9 @@ use assistant_slash_command::{
     SlashCommandResult, SlashCommandWorkingSet,
 };
 use assistant_slash_commands::FileCommandMetadata;
-use assistant_tool::ToolWorkingSet;
 use client::{self, proto, telemetry::Telemetry};
 use clock::ReplicaId;
 use collections::{HashMap, HashSet};
-use feature_flags::{FeatureFlagAppExt, ToolUseFeatureFlag};
 use fs::{Fs, RemoveOptions};
 use futures::{future::Shared, FutureExt, StreamExt};
 use gpui::{
@@ -21,14 +19,10 @@ use gpui::{
 };
 use language::{AnchorRangeExt, Bias, Buffer, LanguageRegistry, OffsetRangeExt, Point, ToOffset};
 use language_model::{
-    LanguageModel, LanguageModelCacheConfiguration, LanguageModelCompletionEvent,
-    LanguageModelImage, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
-    LanguageModelRequestTool, LanguageModelToolResult, LanguageModelToolUse,
-    LanguageModelToolUseId, MessageContent, Role, StopReason,
-};
-use language_models::{
-    provider::cloud::{MaxMonthlySpendReachedError, PaymentRequiredError},
-    report_assistant_event,
+    report_assistant_event, LanguageModel, LanguageModelCacheConfiguration,
+    LanguageModelCompletionEvent, LanguageModelImage, LanguageModelRegistry, LanguageModelRequest,
+    LanguageModelRequestMessage, LanguageModelToolUseId, MaxMonthlySpendReachedError,
+    MessageContent, PaymentRequiredError, Role, StopReason,
 };
 use open_ai::Model as OpenAiModel;
 use paths::contexts_dir;
@@ -438,11 +432,6 @@ pub enum ContextEvent {
     SlashCommandOutputSectionAdded {
         section: SlashCommandOutputSection<language::Anchor>,
     },
-    UsePendingTools,
-    ToolFinished {
-        tool_use_id: LanguageModelToolUseId,
-        output_range: Range<language::Anchor>,
-    },
     Operation(ContextOperation),
 }
 
@@ -528,21 +517,12 @@ pub enum Content {
         render_image: Arc<RenderImage>,
         image: Shared<Task<Option<LanguageModelImage>>>,
     },
-    ToolUse {
-        range: Range<language::Anchor>,
-        tool_use: LanguageModelToolUse,
-    },
-    ToolResult {
-        range: Range<language::Anchor>,
-        tool_use_id: LanguageModelToolUseId,
-    },
 }
 
 impl Content {
     fn range(&self) -> Range<language::Anchor> {
         match self {
             Self::Image { anchor, .. } => *anchor..*anchor,
-            Self::ToolUse { range, .. } | Self::ToolResult { range, .. } => range.clone(),
         }
     }
 
@@ -599,9 +579,7 @@ pub struct AssistantContext {
     invoked_slash_commands: HashMap<InvokedSlashCommandId, InvokedSlashCommand>,
     edits_since_last_parse: language::Subscription,
     slash_commands: Arc<SlashCommandWorkingSet>,
-    tools: Arc<ToolWorkingSet>,
     slash_command_output_sections: Vec<SlashCommandOutputSection<language::Anchor>>,
-    pending_tool_uses_by_id: HashMap<LanguageModelToolUseId, PendingToolUse>,
     message_anchors: Vec<MessageAnchor>,
     contents: Vec<Content>,
     messages_metadata: HashMap<MessageId, MessageMetadata>,
@@ -654,7 +632,6 @@ impl AssistantContext {
         telemetry: Option<Arc<Telemetry>>,
         prompt_builder: Arc<PromptBuilder>,
         slash_commands: Arc<SlashCommandWorkingSet>,
-        tools: Arc<ToolWorkingSet>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new(
@@ -664,7 +641,6 @@ impl AssistantContext {
             language_registry,
             prompt_builder,
             slash_commands,
-            tools,
             project,
             telemetry,
             cx,
@@ -679,7 +655,6 @@ impl AssistantContext {
         language_registry: Arc<LanguageRegistry>,
         prompt_builder: Arc<PromptBuilder>,
         slash_commands: Arc<SlashCommandWorkingSet>,
-        tools: Arc<ToolWorkingSet>,
         project: Option<Entity<Project>>,
         telemetry: Option<Arc<Telemetry>>,
         cx: &mut Context<Self>,
@@ -707,7 +682,6 @@ impl AssistantContext {
             messages_metadata: Default::default(),
             parsed_slash_commands: Vec::new(),
             invoked_slash_commands: HashMap::default(),
-            pending_tool_uses_by_id: HashMap::default(),
             slash_command_output_sections: Vec::new(),
             edits_since_last_parse: edits_since_last_slash_command_parse,
             summary: None,
@@ -725,7 +699,6 @@ impl AssistantContext {
             project,
             language_registry,
             slash_commands,
-            tools,
             patches: Vec::new(),
             xml_tags: Vec::new(),
             prompt_builder,
@@ -802,7 +775,6 @@ impl AssistantContext {
         language_registry: Arc<LanguageRegistry>,
         prompt_builder: Arc<PromptBuilder>,
         slash_commands: Arc<SlashCommandWorkingSet>,
-        tools: Arc<ToolWorkingSet>,
         project: Option<Entity<Project>>,
         telemetry: Option<Arc<Telemetry>>,
         cx: &mut Context<Self>,
@@ -815,7 +787,6 @@ impl AssistantContext {
             language_registry,
             prompt_builder,
             slash_commands,
-            tools,
             project,
             telemetry,
             cx,
@@ -848,10 +819,6 @@ impl AssistantContext {
         &self.slash_commands
     }
 
-    pub fn tools(&self) -> &Arc<ToolWorkingSet> {
-        &self.tools
-    }
-
     pub fn set_capability(&mut self, capability: language::Capability, cx: &mut Context<Self>) {
         self.buffer
             .update(cx, |buffer, cx| buffer.set_capability(capability, cx));
@@ -881,7 +848,7 @@ impl AssistantContext {
             .collect::<Vec<_>>();
         context_ops.extend(self.pending_ops.iter().cloned());
 
-        cx.background_executor().spawn(async move {
+        cx.background_spawn(async move {
             let buffer_ops = buffer_ops.await;
             context_ops.sort_unstable_by_key(|op| op.timestamp());
             buffer_ops
@@ -1177,14 +1144,6 @@ impl AssistantContext {
         })
     }
 
-    pub fn pending_tool_uses(&self) -> Vec<&PendingToolUse> {
-        self.pending_tool_uses_by_id.values().collect()
-    }
-
-    pub fn get_tool_use_by_id(&self, id: &LanguageModelToolUseId) -> Option<&PendingToolUse> {
-        self.pending_tool_uses_by_id.get(id)
-    }
-
     fn set_language(&mut self, cx: &mut Context<Self>) {
         let markdown = self.language_registry.language_for_name("Markdown");
         cx.spawn(|this, mut cx| async move {
@@ -1230,11 +1189,14 @@ impl AssistantContext {
         let Some(model) = LanguageModelRegistry::read_global(cx).active_model() else {
             return;
         };
+        let debounce = self.token_count.is_some();
         self.pending_token_count = cx.spawn(|this, mut cx| {
             async move {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
+                if debounce {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(200))
+                        .await;
+                }
 
                 let token_count = cx.update(|cx| model.count_tokens(request, cx))?.await?;
                 this.update(&mut cx, |this, cx| {
@@ -2206,68 +2168,6 @@ impl AssistantContext {
         );
     }
 
-    pub fn insert_tool_output(
-        &mut self,
-        tool_use_id: LanguageModelToolUseId,
-        output: Task<Result<String>>,
-        cx: &mut Context<Self>,
-    ) {
-        let insert_output_task = cx.spawn(|this, mut cx| {
-            let tool_use_id = tool_use_id.clone();
-            async move {
-                let output = output.await;
-                this.update(&mut cx, |this, cx| match output {
-                    Ok(mut output) => {
-                        const NEWLINE: char = '\n';
-
-                        if !output.ends_with(NEWLINE) {
-                            output.push(NEWLINE);
-                        }
-
-                        let anchor_range = this.buffer.update(cx, |buffer, cx| {
-                            let insert_start = buffer.len().to_offset(buffer);
-                            let insert_end = insert_start;
-
-                            let start = insert_start;
-                            let end = start + output.len() - NEWLINE.len_utf8();
-
-                            buffer.edit([(insert_start..insert_end, output)], None, cx);
-
-                            let output_range = buffer.anchor_after(start)..buffer.anchor_after(end);
-
-                            output_range
-                        });
-
-                        this.insert_content(
-                            Content::ToolResult {
-                                range: anchor_range.clone(),
-                                tool_use_id: tool_use_id.clone(),
-                            },
-                            cx,
-                        );
-
-                        cx.emit(ContextEvent::ToolFinished {
-                            tool_use_id,
-                            output_range: anchor_range,
-                        });
-                    }
-                    Err(err) => {
-                        if let Some(tool_use) = this.pending_tool_uses_by_id.get_mut(&tool_use_id) {
-                            tool_use.status = PendingToolUseStatus::Error(err.to_string());
-                        }
-                    }
-                })
-                .ok();
-            }
-        });
-
-        if let Some(tool_use) = self.pending_tool_uses_by_id.get_mut(&tool_use_id) {
-            tool_use.status = PendingToolUseStatus::Running {
-                _task: insert_output_task.shared(),
-            };
-        }
-    }
-
     pub fn completion_provider_changed(&mut self, cx: &mut Context<Self>) {
         self.count_remaining_tokens(cx);
     }
@@ -2298,23 +2198,7 @@ impl AssistantContext {
         // Compute which messages to cache, including the last one.
         self.mark_cache_anchors(&model.cache_configuration(), false, cx);
 
-        let mut request = self.to_completion_request(request_type, cx);
-
-        // Don't attach tools for now; we'll be removing tool use from
-        // Assistant1 shortly.
-        #[allow(clippy::overly_complex_bool_expr)]
-        if false && cx.has_flag::<ToolUseFeatureFlag>() {
-            request.tools = self
-                .tools
-                .tools(cx)
-                .into_iter()
-                .map(|tool| LanguageModelRequestTool {
-                    name: tool.name(),
-                    description: tool.description(),
-                    input_schema: tool.input_schema(),
-                })
-                .collect();
-        }
+        let request = self.to_completion_request(request_type, cx);
 
         let assistant_message = self
             .insert_message_after(last_message_id, Role::Assistant, MessageStatus::Pending, cx)
@@ -2371,44 +2255,7 @@ impl AssistantContext {
                                             cx,
                                         );
                                     }
-                                    LanguageModelCompletionEvent::ToolUse(tool_use) => {
-                                        const NEWLINE: char = '\n';
-
-                                        let mut text = String::new();
-                                        text.push(NEWLINE);
-                                        text.push_str(
-                                            &serde_json::to_string_pretty(&tool_use)
-                                                .expect("failed to serialize tool use to JSON"),
-                                        );
-                                        text.push(NEWLINE);
-                                        let text_len = text.len();
-
-                                        buffer.edit(
-                                            [(
-                                                message_old_end_offset..message_old_end_offset,
-                                                text,
-                                            )],
-                                            None,
-                                            cx,
-                                        );
-
-                                        let start_ix = message_old_end_offset + NEWLINE.len_utf8();
-                                        let end_ix =
-                                            message_old_end_offset + text_len - NEWLINE.len_utf8();
-                                        let source_range = buffer.anchor_after(start_ix)
-                                            ..buffer.anchor_after(end_ix);
-
-                                        this.pending_tool_uses_by_id.insert(
-                                            tool_use.id.clone(),
-                                            PendingToolUse {
-                                                id: tool_use.id,
-                                                name: tool_use.name,
-                                                input: tool_use.input,
-                                                status: PendingToolUseStatus::Idle,
-                                                source_range,
-                                            },
-                                        );
-                                    }
+                                    LanguageModelCompletionEvent::ToolUse(_) => {}
                                 }
                             });
 
@@ -2491,9 +2338,7 @@ impl AssistantContext {
 
                     if let Ok(stop_reason) = result {
                         match stop_reason {
-                            StopReason::ToolUse => {
-                                cx.emit(ContextEvent::UsePendingTools);
-                            }
+                            StopReason::ToolUse => {}
                             StopReason::EndTurn => {}
                             StopReason::MaxTokens => {}
                         }
@@ -2571,23 +2416,6 @@ impl AssistantContext {
                                     .content
                                     .push(language_model::MessageContent::Image(image));
                             }
-                        }
-                        Content::ToolUse { tool_use, .. } => {
-                            request_message
-                                .content
-                                .push(language_model::MessageContent::ToolUse(tool_use.clone()));
-                        }
-                        Content::ToolResult { tool_use_id, .. } => {
-                            request_message.content.push(
-                                language_model::MessageContent::ToolResult(
-                                    LanguageModelToolResult {
-                                        tool_use_id: tool_use_id.to_string(),
-                                        is_error: false,
-                                        content: collect_text_content(buffer, range.clone())
-                                            .unwrap_or_default(),
-                                    },
-                                ),
-                            );
                         }
                     }
 
@@ -3535,7 +3363,7 @@ impl SavedContextV0_1_0 {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SavedContextMetadata {
     pub title: String,
     pub path: PathBuf,

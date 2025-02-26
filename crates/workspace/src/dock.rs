@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
 use std::sync::Arc;
-use ui::{h_flex, ContextMenu, IconButton, Tooltip};
+use ui::{h_flex, ContextMenu, Divider, DividerColor, IconButton, Tooltip};
 use ui::{prelude::*, right_click_menu};
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = Pixels(6.);
@@ -349,7 +349,11 @@ impl Dock {
             .and_then(|index| self.panel_entries.get(index))
     }
 
-    pub(crate) fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn active_panel_index(&self) -> Option<usize> {
+        self.active_panel_index
+    }
+
+    pub fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if open != self.is_open {
             self.is_open = open;
             if let Some(active_panel) = self.active_panel_entry() {
@@ -801,7 +805,7 @@ impl Render for PanelButtons {
             DockPosition::Bottom | DockPosition::Right => (Corner::BottomRight, Corner::TopRight),
         };
 
-        let buttons = dock
+        let buttons: Vec<_> = dock
             .panel_entries
             .iter()
             .enumerate()
@@ -869,9 +873,16 @@ impl Render for PanelButtons {
                                 }),
                         ),
                 )
-            });
+            })
+            .collect();
 
-        h_flex().gap_0p5().children(buttons)
+        let has_buttons = !buttons.is_empty();
+        h_flex()
+            .gap_1()
+            .children(buttons)
+            .when(has_buttons && dock.position == DockPosition::Left, |this| {
+                this.child(Divider::vertical().color(DividerColor::Border))
+            })
     }
 }
 

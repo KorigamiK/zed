@@ -15,6 +15,8 @@ use std::{
     cmp,
     fmt::{self, Debug},
     iter, mem,
+    path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -137,6 +139,62 @@ impl fmt::Display for PeerId {
     }
 }
 
+pub trait FromProto {
+    fn from_proto(proto: String) -> Self;
+}
+
+pub trait ToProto {
+    fn to_proto(self) -> String;
+}
+
+impl FromProto for PathBuf {
+    #[cfg(target_os = "windows")]
+    fn from_proto(proto: String) -> Self {
+        proto.split("/").collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn from_proto(proto: String) -> Self {
+        PathBuf::from(proto)
+    }
+}
+
+impl FromProto for Arc<Path> {
+    fn from_proto(proto: String) -> Self {
+        PathBuf::from_proto(proto).into()
+    }
+}
+
+impl ToProto for PathBuf {
+    #[cfg(target_os = "windows")]
+    fn to_proto(self) -> String {
+        self.components()
+            .map(|comp| comp.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn to_proto(self) -> String {
+        self.to_string_lossy().to_string()
+    }
+}
+
+impl ToProto for &Path {
+    #[cfg(target_os = "windows")]
+    fn to_proto(self) -> String {
+        self.components()
+            .map(|comp| comp.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn to_proto(self) -> String {
+        self.to_string_lossy().to_string()
+    }
+}
+
 messages!(
     (AcceptTermsOfService, Foreground),
     (AcceptTermsOfServiceResponse, Foreground),
@@ -219,8 +277,10 @@ messages!(
     (GetImplementationResponse, Background),
     (GetLlmToken, Background),
     (GetLlmTokenResponse, Background),
-    (GetStagedText, Foreground),
-    (GetStagedTextResponse, Foreground),
+    (OpenUnstagedDiff, Foreground),
+    (OpenUnstagedDiffResponse, Foreground),
+    (OpenUncommittedDiff, Foreground),
+    (OpenUncommittedDiffResponse, Foreground),
     (GetUsers, Foreground),
     (Hello, Foreground),
     (IncomingCall, Foreground),
@@ -249,6 +309,7 @@ messages!(
     (OpenBufferForSymbol, Background),
     (OpenBufferForSymbolResponse, Background),
     (OpenBufferResponse, Background),
+    (OpenCommitMessageBuffer, Background),
     (PerformRename, Background),
     (PerformRenameResponse, Background),
     (Ping, Foreground),
@@ -308,7 +369,7 @@ messages!(
     (UpdateUserChannels, Foreground),
     (UpdateContacts, Foreground),
     (UpdateDiagnosticSummary, Foreground),
-    (UpdateDiffBase, Foreground),
+    (UpdateDiffBases, Foreground),
     (UpdateFollowers, Foreground),
     (UpdateInviteInfo, Foreground),
     (UpdateLanguageServer, Foreground),
@@ -379,6 +440,16 @@ messages!(
     (SyncExtensionsResponse, Background),
     (InstallExtension, Background),
     (RegisterBufferWithLanguageServers, Background),
+    (GitReset, Background),
+    (GitCheckoutFiles, Background),
+    (GitShow, Background),
+    (GitCommitDetails, Background),
+    (SetIndexText, Background),
+    (Push, Background),
+    (Fetch, Background),
+    (GetRemotes, Background),
+    (GetRemotesResponse, Background),
+    (Pull, Background),
 );
 
 request_messages!(
@@ -421,7 +492,8 @@ request_messages!(
     (GetProjectSymbols, GetProjectSymbolsResponse),
     (GetReferences, GetReferencesResponse),
     (GetSignatureHelp, GetSignatureHelpResponse),
-    (GetStagedText, GetStagedTextResponse),
+    (OpenUnstagedDiff, OpenUnstagedDiffResponse),
+    (OpenUncommittedDiff, OpenUncommittedDiffResponse),
     (GetSupermavenApiKey, GetSupermavenApiKeyResponse),
     (GetTypeDefinition, GetTypeDefinitionResponse),
     (LinkedEditingRange, LinkedEditingRangeResponse),
@@ -443,6 +515,7 @@ request_messages!(
     (OpenBufferById, OpenBufferResponse),
     (OpenBufferByPath, OpenBufferResponse),
     (OpenBufferForSymbol, OpenBufferForSymbolResponse),
+    (OpenCommitMessageBuffer, OpenBufferResponse),
     (OpenNewBuffer, OpenBufferResponse),
     (PerformRename, PerformRenameResponse),
     (Ping, Ack),
@@ -510,6 +583,14 @@ request_messages!(
     (SyncExtensions, SyncExtensionsResponse),
     (InstallExtension, Ack),
     (RegisterBufferWithLanguageServers, Ack),
+    (GitShow, GitCommitDetails),
+    (GitReset, Ack),
+    (GitCheckoutFiles, Ack),
+    (SetIndexText, Ack),
+    (Push, Ack),
+    (Fetch, Ack),
+    (GetRemotes, GetRemotesResponse),
+    (Pull, Ack),
 );
 
 entity_messages!(
@@ -541,7 +622,8 @@ entity_messages!(
     GetProjectSymbols,
     GetReferences,
     GetSignatureHelp,
-    GetStagedText,
+    OpenUnstagedDiff,
+    OpenUncommittedDiff,
     GetTypeDefinition,
     InlayHints,
     JoinProject,
@@ -554,6 +636,7 @@ entity_messages!(
     OpenBufferById,
     OpenBufferByPath,
     OpenBufferForSymbol,
+    OpenCommitMessageBuffer,
     PerformRename,
     PrepareRename,
     RefreshInlayHints,
@@ -572,7 +655,7 @@ entity_messages!(
     UpdateBuffer,
     UpdateBufferFile,
     UpdateDiagnosticSummary,
-    UpdateDiffBase,
+    UpdateDiffBases,
     UpdateLanguageServer,
     UpdateProject,
     UpdateProjectCollaborator,
@@ -600,6 +683,14 @@ entity_messages!(
     GetPathMetadata,
     CancelLanguageServerWork,
     RegisterBufferWithLanguageServers,
+    GitShow,
+    GitReset,
+    GitCheckoutFiles,
+    SetIndexText,
+    Push,
+    Fetch,
+    GetRemotes,
+    Pull,
 );
 
 entity_messages!(
@@ -749,5 +840,23 @@ mod tests {
             id: u32::MAX,
         };
         assert_eq!(PeerId::from_u64(peer_id.as_u64()), peer_id);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_proto() {
+        fn generate_proto_path(path: PathBuf) -> PathBuf {
+            let proto = path.to_proto();
+            PathBuf::from_proto(proto)
+        }
+
+        let path = PathBuf::from("C:\\foo\\bar");
+        assert_eq!(path, generate_proto_path(path.clone()));
+
+        let path = PathBuf::from("C:/foo/bar/");
+        assert_eq!(path, generate_proto_path(path.clone()));
+
+        let path = PathBuf::from("C:/foo\\bar\\");
+        assert_eq!(path, generate_proto_path(path.clone()));
     }
 }

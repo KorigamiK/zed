@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use ::settings::Settings;
 use anyhow::Result;
+use fallback_themes::apply_status_color_defaults;
 use fs::Fs;
 use gpui::{
     px, App, AssetSource, HighlightStyle, Hsla, Pixels, Refineable, SharedString, WindowAppearance,
@@ -155,7 +156,9 @@ impl ThemeFamily {
             AppearanceContent::Light => StatusColors::light(),
             AppearanceContent::Dark => StatusColors::dark(),
         };
-        refined_status_colors.refine(&theme.style.status_colors_refinement());
+        let mut status_colors_refinement = theme.style.status_colors_refinement();
+        apply_status_color_defaults(&mut status_colors_refinement);
+        refined_status_colors.refine(&status_colors_refinement);
 
         let mut refined_player_colors = match theme.appearance {
             AppearanceContent::Light => PlayerColors::light(),
@@ -325,14 +328,6 @@ impl Theme {
         hsla.l = (hsla.l - amount).max(0.0);
         hsla
     }
-}
-
-/// Compounds a color with an alpha value.
-/// TODO: Replace this with a method on Hsla.
-pub fn color_alpha(color: Hsla, alpha: f32) -> Hsla {
-    let mut color = color;
-    color.a = alpha;
-    color
 }
 
 /// Asynchronously reads the user theme from the specified path.

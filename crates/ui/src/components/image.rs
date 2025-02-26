@@ -1,4 +1,3 @@
-#![allow(missing_docs)]
 use gpui::{svg, App, IntoElement, Rems, RenderOnce, Size, Styled, Window};
 use serde::{Deserialize, Serialize};
 use strum::{EnumIter, EnumString, IntoStaticStr};
@@ -28,7 +27,7 @@ pub enum VectorName {
 
 /// A vector image, such as an SVG.
 ///
-/// A [`Vector`] is different from an [`Icon`] in that it is intended
+/// A [`Vector`] is different from an [`crate::Icon`] in that it is intended
 /// to be displayed at a specific size, or series of sizes, rather
 /// than conforming to the standard size of an icon.
 #[derive(IntoElement)]

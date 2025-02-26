@@ -359,6 +359,7 @@ fn providers_schema(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema:
     schemars::schema::SchemaObject {
         enum_values: Some(vec![
             "anthropic".into(),
+            "bedrock".into(),
             "google".into(),
             "lmstudio".into(),
             "ollama".into(),
@@ -434,7 +435,7 @@ pub struct LegacyAssistantSettingsContent {
     pub default_open_ai_model: Option<OpenAiModel>,
     /// OpenAI API base URL to use when creating new chats.
     ///
-    /// Default: https://api.openai.com/v1
+    /// Default: <https://api.openai.com/v1>
     pub openai_api_url: Option<String>,
 }
 
@@ -512,7 +513,7 @@ mod tests {
                 AssistantSettings::get_global(cx).default_model,
                 LanguageModelSelection {
                     provider: "zed.dev".into(),
-                    model: "claude-3-5-sonnet".into(),
+                    model: "claude-3-5-sonnet-latest".into(),
                 }
             );
         });

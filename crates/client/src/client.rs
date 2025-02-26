@@ -15,11 +15,12 @@ use async_tungstenite::tungstenite::{
 };
 use chrono::{DateTime, Utc};
 use clock::SystemClock;
+use credentials_provider::CredentialsProvider;
 use futures::{
     channel::oneshot, future::BoxFuture, AsyncReadExt, FutureExt, SinkExt, Stream, StreamExt,
     TryFutureExt as _, TryStreamExt,
 };
-use gpui::{actions, App, AsyncApp, Entity, Global, Task, WeakEntity};
+use gpui::{actions, App, AppContext as _, AsyncApp, Entity, Global, Task, WeakEntity};
 use http_client::{AsyncBody, HttpClient, HttpClientWithUrl};
 use parking_lot::RwLock;
 use postage::watch;
@@ -57,14 +58,6 @@ static ZED_SERVER_URL: LazyLock<Option<String>> =
     LazyLock::new(|| std::env::var("ZED_SERVER_URL").ok());
 static ZED_RPC_URL: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("ZED_RPC_URL").ok());
 
-/// An environment variable whose presence indicates that the development auth
-/// provider should be used.
-///
-/// Only works in development. Setting this environment variable in other release
-/// channels is a no-op.
-pub static ZED_DEVELOPMENT_AUTH: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("ZED_DEVELOPMENT_AUTH").map_or(false, |value| !value.is_empty())
-});
 pub static IMPERSONATE_LOGIN: LazyLock<Option<String>> = LazyLock::new(|| {
     std::env::var("ZED_IMPERSONATE")
         .ok()
@@ -193,7 +186,7 @@ pub struct Client {
     peer: Arc<Peer>,
     http: Arc<HttpClientWithUrl>,
     telemetry: Arc<Telemetry>,
-    credentials_provider: Arc<dyn CredentialsProvider + Send + Sync + 'static>,
+    credentials_provider: ClientCredentialsProvider,
     state: RwLock<ClientState>,
     handler_set: parking_lot::Mutex<ProtoMessageHandlerSet>,
 
@@ -304,16 +297,46 @@ impl Credentials {
     }
 }
 
-/// A provider for [`Credentials`].
-///
-/// Used to abstract over reading and writing credentials to some form of
-/// persistence (like the system keychain).
-trait CredentialsProvider {
+pub struct ClientCredentialsProvider {
+    provider: Arc<dyn CredentialsProvider>,
+}
+
+impl ClientCredentialsProvider {
+    pub fn new(cx: &App) -> Self {
+        Self {
+            provider: <dyn CredentialsProvider>::global(cx),
+        }
+    }
+
+    fn server_url(&self, cx: &AsyncApp) -> Result<String> {
+        cx.update(|cx| ClientSettings::get_global(cx).server_url.clone())
+    }
+
     /// Reads the credentials from the provider.
     fn read_credentials<'a>(
         &'a self,
         cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Option<Credentials>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Option<Credentials>> + 'a>> {
+        async move {
+            if IMPERSONATE_LOGIN.is_some() {
+                return None;
+            }
+
+            let server_url = self.server_url(cx).ok()?;
+            let (user_id, access_token) = self
+                .provider
+                .read_credentials(&server_url, cx)
+                .await
+                .log_err()
+                .flatten()?;
+
+            Some(Credentials {
+                user_id: user_id.parse().ok()?,
+                access_token: String::from_utf8(access_token).ok()?,
+            })
+        }
+        .boxed_local()
+    }
 
     /// Writes the credentials to the provider.
     fn write_credentials<'a>(
@@ -321,13 +344,32 @@ trait CredentialsProvider {
         user_id: u64,
         access_token: String,
         cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        async move {
+            let server_url = self.server_url(cx)?;
+            self.provider
+                .write_credentials(
+                    &server_url,
+                    &user_id.to_string(),
+                    access_token.as_bytes(),
+                    cx,
+                )
+                .await
+        }
+        .boxed_local()
+    }
 
     /// Deletes the credentials from the provider.
     fn delete_credentials<'a>(
         &'a self,
         cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        async move {
+            let server_url = self.server_url(cx)?;
+            self.provider.delete_credentials(&server_url, cx).await
+        }
+        .boxed_local()
+    }
 }
 
 impl Default for ClientState {
@@ -379,7 +421,7 @@ pub struct PendingEntitySubscription<T: 'static> {
 }
 
 impl<T: 'static> PendingEntitySubscription<T> {
-    pub fn set_model(mut self, model: &Entity<T>, cx: &AsyncApp) -> Subscription {
+    pub fn set_entity(mut self, entity: &Entity<T>, cx: &AsyncApp) -> Subscription {
         self.consumed = true;
         let mut handlers = self.client.handler_set.lock();
         let id = (TypeId::of::<T>(), self.remote_id);
@@ -392,7 +434,7 @@ impl<T: 'static> PendingEntitySubscription<T> {
         handlers.entities_by_type_and_remote_id.insert(
             id,
             EntityMessageSubscriber::Entity {
-                handle: model.downgrade().into(),
+                handle: entity.downgrade().into(),
             },
         );
         drop(handlers);
@@ -484,27 +526,12 @@ impl Client {
         http: Arc<HttpClientWithUrl>,
         cx: &mut App,
     ) -> Arc<Self> {
-        let use_zed_development_auth = match ReleaseChannel::try_global(cx) {
-            Some(ReleaseChannel::Dev) => *ZED_DEVELOPMENT_AUTH,
-            Some(ReleaseChannel::Nightly | ReleaseChannel::Preview | ReleaseChannel::Stable)
-            | None => false,
-        };
-
-        let credentials_provider: Arc<dyn CredentialsProvider + Send + Sync + 'static> =
-            if use_zed_development_auth {
-                Arc::new(DevelopmentCredentialsProvider {
-                    path: paths::config_dir().join("development_auth"),
-                })
-            } else {
-                Arc::new(KeychainCredentialsProvider)
-            };
-
         Arc::new(Self {
             id: AtomicU64::new(0),
             peer: Peer::new(0),
             telemetry: Telemetry::new(clock, http.clone(), cx),
             http,
-            credentials_provider,
+            credentials_provider: ClientCredentialsProvider::new(cx),
             state: Default::default(),
             handler_set: Default::default(),
 
@@ -686,8 +713,8 @@ impl Client {
         H: 'static + Sync + Fn(Entity<E>, TypedEnvelope<M>, AsyncApp) -> F + Send + Sync,
         F: 'static + Future<Output = Result<()>>,
     {
-        self.add_message_handler_impl(entity, move |model, message, _, cx| {
-            handler(model, message, cx)
+        self.add_message_handler_impl(entity, move |entity, message, _, cx| {
+            handler(entity, message, cx)
         })
     }
 
@@ -709,7 +736,7 @@ impl Client {
         let message_type_id = TypeId::of::<M>();
         let mut state = self.handler_set.lock();
         state
-            .models_by_message_type
+            .entities_by_message_type
             .insert(message_type_id, entity.into());
 
         let prev_handler = state.message_handlers.insert(
@@ -738,7 +765,7 @@ impl Client {
 
     pub fn add_request_handler<M, E, H, F>(
         self: &Arc<Self>,
-        model: WeakEntity<E>,
+        entity: WeakEntity<E>,
         handler: H,
     ) -> Subscription
     where
@@ -747,7 +774,7 @@ impl Client {
         H: 'static + Sync + Fn(Entity<E>, TypedEnvelope<M>, AsyncApp) -> F + Send + Sync,
         F: 'static + Future<Output = Result<M::Response>>,
     {
-        self.add_message_handler_impl(model, move |handle, envelope, this, cx| {
+        self.add_message_handler_impl(entity, move |handle, envelope, this, cx| {
             Self::respond_to_request(envelope.receipt(), handler(handle, envelope, cx), this)
         })
     }
@@ -842,8 +869,7 @@ impl Client {
                     Ok(conn) => {
                         self.state.write().credentials = Some(credentials.clone());
                         if !read_from_provider && IMPERSONATE_LOGIN.is_none() {
-                                self.credentials_provider.write_credentials(credentials.user_id, credentials.access_token, cx).await.log_err();
-
+                            self.credentials_provider.write_credentials(credentials.user_id, credentials.access_token, cx).await.log_err();
                         }
 
                         futures::select_biased! {
@@ -1064,7 +1090,7 @@ impl Client {
         let rpc_url = self.rpc_url(http, release_channel);
         let system_id = self.telemetry.system_id();
         let metrics_id = self.telemetry.metrics_id();
-        cx.background_executor().spawn(async move {
+        cx.background_spawn(async move {
             use HttpOrHttps::*;
 
             #[derive(Debug)]
@@ -1124,31 +1150,11 @@ impl Client {
 
             match url_scheme {
                 Https => {
-                    let client_config = {
-                        let mut root_store = rustls::RootCertStore::empty();
-
-                        let root_certs = rustls_native_certs::load_native_certs();
-                        for error in root_certs.errors {
-                            log::warn!("error loading native certs: {:?}", error);
-                        }
-                        root_store.add_parsable_certificates(
-                            &root_certs
-                                .certs
-                                .into_iter()
-                                .map(|cert| cert.as_ref().to_owned())
-                                .collect::<Vec<_>>(),
-                        );
-                        rustls::ClientConfig::builder()
-                            .with_safe_defaults()
-                            .with_root_certificates(root_store)
-                            .with_no_client_auth()
-                    };
-
                     let (stream, _) =
                         async_tungstenite::async_tls::client_async_tls_with_connector(
                             request,
                             stream,
-                            Some(client_config.into()),
+                            Some(http_client::tls_config().into()),
                         )
                         .await?;
                     Ok(Connection::new(
@@ -1608,130 +1614,6 @@ impl ProtoClient for Client {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct DevelopmentCredentials {
-    user_id: u64,
-    access_token: String,
-}
-
-/// A credentials provider that stores credentials in a local file.
-///
-/// This MUST only be used in development, as this is not a secure way of storing
-/// credentials on user machines.
-///
-/// Its existence is purely to work around the annoyance of having to constantly
-/// re-allow access to the system keychain when developing Zed.
-struct DevelopmentCredentialsProvider {
-    path: PathBuf,
-}
-
-impl CredentialsProvider for DevelopmentCredentialsProvider {
-    fn read_credentials<'a>(
-        &'a self,
-        _cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Option<Credentials>> + 'a>> {
-        async move {
-            if IMPERSONATE_LOGIN.is_some() {
-                return None;
-            }
-
-            let json = std::fs::read(&self.path).log_err()?;
-
-            let credentials: DevelopmentCredentials = serde_json::from_slice(&json).log_err()?;
-
-            Some(Credentials {
-                user_id: credentials.user_id,
-                access_token: credentials.access_token,
-            })
-        }
-        .boxed_local()
-    }
-
-    fn write_credentials<'a>(
-        &'a self,
-        user_id: u64,
-        access_token: String,
-        _cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move {
-            let json = serde_json::to_string(&DevelopmentCredentials {
-                user_id,
-                access_token,
-            })?;
-
-            std::fs::write(&self.path, json)?;
-
-            Ok(())
-        }
-        .boxed_local()
-    }
-
-    fn delete_credentials<'a>(
-        &'a self,
-        _cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move { Ok(std::fs::remove_file(&self.path)?) }.boxed_local()
-    }
-}
-
-/// A credentials provider that stores credentials in the system keychain.
-struct KeychainCredentialsProvider;
-
-impl CredentialsProvider for KeychainCredentialsProvider {
-    fn read_credentials<'a>(
-        &'a self,
-        cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Option<Credentials>> + 'a>> {
-        async move {
-            if IMPERSONATE_LOGIN.is_some() {
-                return None;
-            }
-
-            let (user_id, access_token) = cx
-                .update(|cx| cx.read_credentials(&ClientSettings::get_global(cx).server_url))
-                .log_err()?
-                .await
-                .log_err()??;
-
-            Some(Credentials {
-                user_id: user_id.parse().ok()?,
-                access_token: String::from_utf8(access_token).ok()?,
-            })
-        }
-        .boxed_local()
-    }
-
-    fn write_credentials<'a>(
-        &'a self,
-        user_id: u64,
-        access_token: String,
-        cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move {
-            cx.update(move |cx| {
-                cx.write_credentials(
-                    &ClientSettings::get_global(cx).server_url,
-                    &user_id.to_string(),
-                    access_token.as_bytes(),
-                )
-            })?
-            .await
-        }
-        .boxed_local()
-    }
-
-    fn delete_credentials<'a>(
-        &'a self,
-        cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move {
-            cx.update(move |cx| cx.delete_credentials(&ClientSettings::get_global(cx).server_url))?
-                .await
-        }
-        .boxed_local()
-    }
-}
-
 /// prefix for the zed:// url scheme
 pub const ZED_URL_SCHEME: &str = "zed";
 
@@ -1763,7 +1645,7 @@ mod tests {
     use crate::test::FakeServer;
 
     use clock::FakeSystemClock;
-    use gpui::{AppContext as _, BackgroundExecutor, TestAppContext};
+    use gpui::{BackgroundExecutor, TestAppContext};
     use http_client::FakeHttpClient;
     use parking_lot::Mutex;
     use proto::TypedEnvelope;
@@ -1826,7 +1708,7 @@ mod tests {
 
         // Time out when client tries to connect.
         client.override_authenticate(move |cx| {
-            cx.background_executor().spawn(async move {
+            cx.background_spawn(async move {
                 Ok(Credentials {
                     user_id,
                     access_token: "token".into(),
@@ -1834,7 +1716,7 @@ mod tests {
             })
         });
         client.override_establish_connection(|_, cx| {
-            cx.background_executor().spawn(async move {
+            cx.background_spawn(async move {
                 future::pending::<()>().await;
                 unreachable!()
             })
@@ -1868,7 +1750,7 @@ mod tests {
         // Time out when re-establishing the connection.
         server.allow_connections();
         client.override_establish_connection(|_, cx| {
-            cx.background_executor().spawn(async move {
+            cx.background_spawn(async move {
                 future::pending::<()>().await;
                 unreachable!()
             })
@@ -1907,7 +1789,7 @@ mod tests {
             move |cx| {
                 let auth_count = auth_count.clone();
                 let dropped_auth_count = dropped_auth_count.clone();
-                cx.background_executor().spawn(async move {
+                cx.background_spawn(async move {
                     *auth_count.lock() += 1;
                     let _drop = util::defer(move || *dropped_auth_count.lock() += 1);
                     future::pending::<()>().await;
@@ -1948,9 +1830,9 @@ mod tests {
 
         let (done_tx1, done_rx1) = smol::channel::unbounded();
         let (done_tx2, done_rx2) = smol::channel::unbounded();
-        AnyProtoClient::from(client.clone()).add_model_message_handler(
-            move |model: Entity<TestModel>, _: TypedEnvelope<proto::JoinProject>, mut cx| {
-                match model.update(&mut cx, |model, _| model.id).unwrap() {
+        AnyProtoClient::from(client.clone()).add_entity_message_handler(
+            move |entity: Entity<TestEntity>, _: TypedEnvelope<proto::JoinProject>, mut cx| {
+                match entity.update(&mut cx, |entity, _| entity.id).unwrap() {
                     1 => done_tx1.try_send(()).unwrap(),
                     2 => done_tx2.try_send(()).unwrap(),
                     _ => unreachable!(),
@@ -1958,15 +1840,15 @@ mod tests {
                 async { Ok(()) }
             },
         );
-        let model1 = cx.new(|_| TestModel {
+        let entity1 = cx.new(|_| TestEntity {
             id: 1,
             subscription: None,
         });
-        let model2 = cx.new(|_| TestModel {
+        let entity2 = cx.new(|_| TestEntity {
             id: 2,
             subscription: None,
         });
-        let model3 = cx.new(|_| TestModel {
+        let entity3 = cx.new(|_| TestEntity {
             id: 3,
             subscription: None,
         });
@@ -1974,17 +1856,17 @@ mod tests {
         let _subscription1 = client
             .subscribe_to_entity(1)
             .unwrap()
-            .set_model(&model1, &mut cx.to_async());
+            .set_entity(&entity1, &mut cx.to_async());
         let _subscription2 = client
             .subscribe_to_entity(2)
             .unwrap()
-            .set_model(&model2, &mut cx.to_async());
+            .set_entity(&entity2, &mut cx.to_async());
         // Ensure dropping a subscription for the same entity type still allows receiving of
         // messages for other entity IDs of the same type.
         let subscription3 = client
             .subscribe_to_entity(3)
             .unwrap()
-            .set_model(&model3, &mut cx.to_async());
+            .set_entity(&entity3, &mut cx.to_async());
         drop(subscription3);
 
         server.send(proto::JoinProject { project_id: 1 });
@@ -2006,11 +1888,11 @@ mod tests {
         });
         let server = FakeServer::for_client(user_id, &client, cx).await;
 
-        let model = cx.new(|_| TestModel::default());
+        let entity = cx.new(|_| TestEntity::default());
         let (done_tx1, _done_rx1) = smol::channel::unbounded();
         let (done_tx2, done_rx2) = smol::channel::unbounded();
         let subscription1 = client.add_message_handler(
-            model.downgrade(),
+            entity.downgrade(),
             move |_, _: TypedEnvelope<proto::Ping>, _| {
                 done_tx1.try_send(()).unwrap();
                 async { Ok(()) }
@@ -2018,7 +1900,7 @@ mod tests {
         );
         drop(subscription1);
         let _subscription2 = client.add_message_handler(
-            model.downgrade(),
+            entity.downgrade(),
             move |_, _: TypedEnvelope<proto::Ping>, _| {
                 done_tx2.try_send(()).unwrap();
                 async { Ok(()) }
@@ -2041,27 +1923,27 @@ mod tests {
         });
         let server = FakeServer::for_client(user_id, &client, cx).await;
 
-        let model = cx.new(|_| TestModel::default());
+        let entity = cx.new(|_| TestEntity::default());
         let (done_tx, done_rx) = smol::channel::unbounded();
         let subscription = client.add_message_handler(
-            model.clone().downgrade(),
-            move |model: Entity<TestModel>, _: TypedEnvelope<proto::Ping>, mut cx| {
-                model
-                    .update(&mut cx, |model, _| model.subscription.take())
+            entity.clone().downgrade(),
+            move |entity: Entity<TestEntity>, _: TypedEnvelope<proto::Ping>, mut cx| {
+                entity
+                    .update(&mut cx, |entity, _| entity.subscription.take())
                     .unwrap();
                 done_tx.try_send(()).unwrap();
                 async { Ok(()) }
             },
         );
-        model.update(cx, |model, _| {
-            model.subscription = Some(subscription);
+        entity.update(cx, |entity, _| {
+            entity.subscription = Some(subscription);
         });
         server.send(proto::Ping {});
         done_rx.recv().await.unwrap();
     }
 
     #[derive(Default)]
-    struct TestModel {
+    struct TestEntity {
         id: usize,
         subscription: Option<Subscription>,
     }

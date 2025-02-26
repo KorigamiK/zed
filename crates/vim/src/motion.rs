@@ -141,105 +141,105 @@ pub enum Motion {
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct NextWordStart {
     #[serde(default)]
     ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct NextWordEnd {
     #[serde(default)]
     ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct PreviousWordStart {
     #[serde(default)]
     ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct PreviousWordEnd {
     #[serde(default)]
     ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NextSubwordStart {
     #[serde(default)]
     pub(crate) ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NextSubwordEnd {
     #[serde(default)]
     pub(crate) ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PreviousSubwordStart {
     #[serde(default)]
     pub(crate) ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PreviousSubwordEnd {
     #[serde(default)]
     pub(crate) ignore_punctuation: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Up {
     #[serde(default)]
     pub(crate) display_lines: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Down {
     #[serde(default)]
     pub(crate) display_lines: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct FirstNonWhitespace {
     #[serde(default)]
     display_lines: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct EndOfLine {
     #[serde(default)]
     display_lines: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct StartOfLine {
     #[serde(default)]
     pub(crate) display_lines: bool,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct UnmatchedForward {
     #[serde(default)]
     char: char,
 }
 
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct UnmatchedBackward {
     #[serde(default)]
     char: char,
@@ -2699,49 +2699,10 @@ fn section_motion(
     };
 
     for _ in 0..times {
-        let point = map.display_point_to_point(display_point, Bias::Left);
-        let Some(excerpt) = map.buffer_snapshot.excerpt_containing(point..point) else {
-            return display_point;
-        };
-        let next_point = match (direction, is_start) {
-            (Direction::Prev, true) => {
-                let mut start = excerpt.start_anchor().to_display_point(&map);
-                if start >= display_point && start.row() > DisplayRow(0) {
-                    let Some(excerpt) = map.buffer_snapshot.excerpt_before(excerpt.id()) else {
-                        return display_point;
-                    };
-                    start = excerpt.start_anchor().to_display_point(&map);
-                }
-                start
-            }
-            (Direction::Prev, false) => {
-                let mut start = excerpt.start_anchor().to_display_point(&map);
-                if start.row() > DisplayRow(0) {
-                    *start.row_mut() -= 1;
-                }
-                map.clip_point(start, Bias::Left)
-            }
-            (Direction::Next, true) => {
-                let mut end = excerpt.end_anchor().to_display_point(&map);
-                *end.row_mut() += 1;
-                map.clip_point(end, Bias::Right)
-            }
-            (Direction::Next, false) => {
-                let mut end = excerpt.end_anchor().to_display_point(&map);
-                *end.column_mut() = 0;
-                if end <= display_point {
-                    *end.row_mut() += 1;
-                    let point_end = map.display_point_to_point(end, Bias::Right);
-                    let Some(excerpt) =
-                        map.buffer_snapshot.excerpt_containing(point_end..point_end)
-                    else {
-                        return display_point;
-                    };
-                    end = excerpt.end_anchor().to_display_point(&map);
-                    *end.column_mut() = 0;
-                }
-                end
-            }
+        let next_point = if is_start {
+            movement::start_of_excerpt(map, display_point, direction)
+        } else {
+            movement::end_of_excerpt(map, display_point, direction)
         };
         if next_point == display_point {
             break;
@@ -2761,6 +2722,8 @@ mod test {
     };
     use editor::display_map::Inlay;
     use indoc::indoc;
+    use language::Point;
+    use multi_buffer::MultiBufferRow;
 
     #[gpui::test]
     async fn test_start_end_of_paragraph(cx: &mut gpui::TestAppContext) {
@@ -3428,10 +3391,10 @@ mod test {
 
         cx.set_state(
             indoc! {"
-            struct Foo {
-            ˇ
-            }
-        "},
+                struct Foo {
+                ˇ
+                }
+            "},
             Mode::Normal,
         );
 
@@ -3439,15 +3402,46 @@ mod test {
             let range = editor.selections.newest_anchor().range();
             let inlay_text = "  field: int,\n  field2: string\n  field3: float";
             let inlay = Inlay::inline_completion(1, range.start, inlay_text);
-            editor.splice_inlays(vec![], vec![inlay], cx);
+            editor.splice_inlays(&[], vec![inlay], cx);
         });
 
         cx.simulate_keystrokes("j");
         cx.assert_state(
             indoc! {"
-            struct Foo {
+                struct Foo {
 
-            ˇ}
+                ˇ}
+            "},
+            Mode::Normal,
+        );
+    }
+
+    #[gpui::test]
+    async fn test_clipping_with_inlay_hints_end_of_line(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        cx.set_state(
+            indoc! {"
+            ˇstruct Foo {
+
+            }
+        "},
+            Mode::Normal,
+        );
+        cx.update_editor(|editor, _window, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let end_of_line =
+                snapshot.anchor_after(Point::new(0, snapshot.line_len(MultiBufferRow(0))));
+            let inlay_text = " hint";
+            let inlay = Inlay::inline_completion(1, end_of_line, inlay_text);
+            editor.splice_inlays(&[], vec![inlay], cx);
+        });
+        cx.simulate_keystrokes("$");
+        cx.assert_state(
+            indoc! {"
+            struct Foo ˇ{
+
+            }
         "},
             Mode::Normal,
         );

@@ -127,15 +127,14 @@ impl Cell {
             } => {
                 let source = source.join("");
 
-                let model = cx.new(|cx| {
+                let entity = cx.new(|cx| {
                     let markdown_parsing_task = {
                         let languages = languages.clone();
                         let source = source.clone();
 
                         cx.spawn_in(window, |this, mut cx| async move {
                             let parsed_markdown = cx
-                                .background_executor()
-                                .spawn(async move {
+                                .background_spawn(async move {
                                     parse_markdown(&source, None, Some(languages)).await
                                 })
                                 .await;
@@ -159,7 +158,7 @@ impl Cell {
                     }
                 });
 
-                Cell::Markdown(model)
+                Cell::Markdown(entity)
             }
             nbformat::v4::Cell::Code {
                 id,
@@ -187,7 +186,7 @@ impl Cell {
 
                     let refinement = TextStyleRefinement {
                         font_family: Some(theme.buffer_font.family.clone()),
-                        font_size: Some(theme.buffer_font_size.into()),
+                        font_size: Some(theme.buffer_font_size(cx).into()),
                         color: Some(cx.theme().colors().editor_foreground),
                         background_color: Some(gpui::transparent_black()),
                         ..Default::default()

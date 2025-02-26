@@ -33,14 +33,14 @@ clock.workspace = true
 collections.workspace = true
 dashmap.workspace = true
 derive_more.workspace = true
+buffer_diff.workspace = true
 envy = "0.4.2"
-fireworks.workspace = true
 futures.workspace = true
 google_ai.workspace = true
 hex.workspace = true
 http_client.workspace = true
 jsonwebtoken.workspace = true
-livekit_server.workspace = true
+livekit_api.workspace = true
 log.workspace = true
 nanoid.workspace = true
 open_ai.workspace = true
@@ -53,7 +53,7 @@ reqwest_client.workspace = true
 rpc.workspace = true
 rustc-demangle.workspace = true
 scrypt = "0.11"
-sea-orm = { version = "1.1.4", features = ["sqlx-postgres", "postgres-array", "runtime-tokio-rustls", "with-uuid"] }
+sea-orm = { version = "1.1.0-rc.1", features = ["sqlx-postgres", "postgres-array", "runtime-tokio-rustls", "with-uuid"] }
 semantic_version.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -97,6 +97,7 @@ extension.workspace = true
 file_finder.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 git = { workspace = true, features = ["test-support"] }
+git_ui = { workspace = true, features = ["test-support"] }
 git_hosting_providers.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 hyper.workspace = true
@@ -116,7 +117,7 @@ release_channel.workspace = true
 remote = { workspace = true, features = ["test-support"] }
 remote_server.workspace = true
 rpc = { workspace = true, features = ["test-support"] }
-sea-orm = { version = "1.1.4", features = ["sqlx-sqlite"] }
+sea-orm = { version = "1.1.0-rc.1", features = ["sqlx-sqlite"] }
 serde_json.workspace = true
 session = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
@@ -131,7 +132,7 @@ worktree = { workspace = true, features = ["test-support"] }
 livekit_client_macos = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-livekit_client =  {workspace = true, features = ["test-support"] }
+livekit_client =  { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 ignored = ["async-stripe"]

@@ -1,4 +1,3 @@
-#![allow(missing_docs)]
 use gpui::{relative, CursorStyle, DefiniteLength, MouseButton};
 use gpui::{transparent_black, AnyElement, AnyView, ClickEvent, Hsla, Rems};
 use smallvec::SmallVec;
@@ -42,6 +41,13 @@ pub trait ButtonCommon: Clickable + Disableable {
 pub enum IconPosition {
     #[default]
     Start,
+    End,
+}
+
+#[derive(Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+pub enum KeybindingPosition {
+    Start,
+    #[default]
     End,
 }
 
@@ -385,6 +391,11 @@ impl ButtonLike {
         Self::new(id).rounding(ButtonLikeRounding::Right)
     }
 
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.base = self.base.opacity(opacity);
+        self
+    }
+
     pub(crate) fn height(mut self, height: DefiniteLength) -> Self {
         self.height = Some(height);
         self
@@ -494,7 +505,9 @@ impl RenderOnce for ButtonLike {
             .group("")
             .flex_none()
             .h(self.height.unwrap_or(self.size.rems().into()))
-            .when_some(self.width, |this, width| this.w(width).justify_center())
+            .when_some(self.width, |this, width| {
+                this.w(width).justify_center().text_center()
+            })
             .when_some(self.rounding, |this, rounding| match rounding {
                 ButtonLikeRounding::All => this.rounded_md(),
                 ButtonLikeRounding::Left => this.rounded_l_md(),

@@ -4,9 +4,9 @@ pub use lsp_types::request::*;
 pub use lsp_types::*;
 
 use anyhow::{anyhow, Context as _, Result};
-use collections::{HashMap, HashSet};
+use collections::HashMap;
 use futures::{channel::oneshot, io::BufWriter, select, AsyncRead, AsyncWrite, Future, FutureExt};
-use gpui::{App, AsyncApp, BackgroundExecutor, SharedString, Task};
+use gpui::{App, AppContext as _, AsyncApp, BackgroundExecutor, SharedString, Task};
 use notification::DidChangeWorkspaceFolders;
 use parking_lot::{Mutex, RwLock};
 use postage::{barrier, prelude::Stream};
@@ -100,7 +100,7 @@ pub struct LanguageServer {
     output_done_rx: Mutex<Option<barrier::Receiver>>,
     server: Arc<Mutex<Option<Child>>>,
     workspace_folders: Arc<Mutex<BTreeSet<Url>>>,
-    registered_buffers: Arc<Mutex<HashSet<Url>>>,
+    root_uri: Url,
 }
 
 /// Identifies a running language server.
@@ -370,6 +370,8 @@ impl LanguageServer {
         let stdin = server.stdin.take().unwrap();
         let stdout = server.stdout.take().unwrap();
         let stderr = server.stderr.take().unwrap();
+        let root_uri = Url::from_file_path(&working_dir)
+            .map_err(|_| anyhow!("{} is not a valid URI", working_dir.display()))?;
         let server = Self::new_internal(
             server_id,
             server_name,
@@ -380,6 +382,7 @@ impl LanguageServer {
             Some(server),
             code_action_kinds,
             binary,
+            root_uri,
             cx,
             move |notification| {
                 log::info!(
@@ -405,6 +408,7 @@ impl LanguageServer {
         server: Option<Child>,
         code_action_kinds: Option<Vec<CodeActionKind>>,
         binary: LanguageServerBinary,
+        root_uri: Url,
         cx: AsyncApp,
         on_unhandled_notification: F,
     ) -> Self
@@ -450,7 +454,7 @@ impl LanguageServer {
             let (stdout, stderr) = futures::join!(stdout_input_task, stderr_input_task);
             stdout.or(stderr)
         });
-        let output_task = cx.background_executor().spawn({
+        let output_task = cx.background_spawn({
             Self::handle_output(
                 stdin,
                 outbound_rx,
@@ -488,7 +492,7 @@ impl LanguageServer {
             output_done_rx: Mutex::new(Some(output_done_rx)),
             server: Arc::new(Mutex::new(server)),
             workspace_folders: Default::default(),
-            registered_buffers: Default::default(),
+            root_uri,
         }
     }
 
@@ -617,7 +621,7 @@ impl LanguageServer {
         InitializeParams {
             process_id: None,
             root_path: None,
-            root_uri: None,
+            root_uri: Some(self.root_uri.clone()),
             initialization_options: None,
             capabilities: ClientCapabilities {
                 general: Some(GeneralClientCapabilities {
@@ -721,6 +725,9 @@ impl LanguageServer {
                     }),
                     rename: Some(RenameClientCapabilities {
                         prepare_support: Some(true),
+                        prepare_support_default_behavior: Some(
+                            PrepareSupportDefaultBehavior::IDENTIFIER,
+                        ),
                         ..Default::default()
                     }),
                     hover: Some(HoverClientCapabilities {
@@ -784,7 +791,7 @@ impl LanguageServer {
                 }),
             },
             trace: None,
-            workspace_folders: None,
+            workspace_folders: Some(vec![]),
             client_info: release_channel::ReleaseChannel::try_global(cx).map(|release_channel| {
                 ClientInfo {
                     name: release_channel.display_name().to_string(),
@@ -1289,24 +1296,17 @@ impl LanguageServer {
         version: i32,
         initial_text: String,
     ) {
-        let was_already_registered = self.registered_buffers.lock().insert(uri.clone());
-
-        if was_already_registered {
-            self.notify::<notification::DidOpenTextDocument>(&DidOpenTextDocumentParams {
-                text_document: TextDocumentItem::new(uri, language_id, version, initial_text),
-            })
-            .log_err();
-        }
+        self.notify::<notification::DidOpenTextDocument>(&DidOpenTextDocumentParams {
+            text_document: TextDocumentItem::new(uri, language_id, version, initial_text),
+        })
+        .log_err();
     }
 
-    pub fn unregister_buffer(&self, uri: &Url) {
-        let was_removed = self.registered_buffers.lock().remove(uri);
-        if was_removed {
-            self.notify::<notification::DidCloseTextDocument>(&DidCloseTextDocumentParams {
-                text_document: TextDocumentIdentifier::new(uri.clone()),
-            })
-            .log_err();
-        }
+    pub fn unregister_buffer(&self, uri: Url) {
+        self.notify::<notification::DidCloseTextDocument>(&DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier::new(uri),
+        })
+        .log_err();
     }
 }
 
@@ -1391,6 +1391,7 @@ impl FakeLanguageServer {
 
         let server_name = LanguageServerName(name.clone().into());
         let process_name = Arc::from(name.as_str());
+        let root = Self::root_path();
         let mut server = LanguageServer::new_internal(
             server_id,
             server_name.clone(),
@@ -1401,6 +1402,7 @@ impl FakeLanguageServer {
             None,
             None,
             binary.clone(),
+            root,
             cx.clone(),
             |_| {},
         );
@@ -1418,6 +1420,7 @@ impl FakeLanguageServer {
                     None,
                     None,
                     binary,
+                    Self::root_path(),
                     cx.clone(),
                     move |msg| {
                         notifications_tx
@@ -1451,6 +1454,15 @@ impl FakeLanguageServer {
         });
 
         (server, fake)
+    }
+    #[cfg(target_os = "windows")]
+    fn root_path() -> Url {
+        Url::from_file_path("C:/").unwrap()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn root_path() -> Url {
+        Url::from_file_path("/").unwrap()
     }
 }
 

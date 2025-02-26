@@ -31,7 +31,7 @@ use sum_tree::Bias;
 use text::{Point, Rope};
 use theme::Theme;
 use unicase::UniCase;
-use util::{maybe, paths::PathExt, post_inc, ResultExt};
+use util::{maybe, post_inc, ResultExt};
 
 #[derive(
     Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
@@ -674,7 +674,10 @@ impl LanguageRegistry {
         user_file_types: Option<&HashMap<Arc<str>, GlobSet>>,
     ) -> Option<AvailableLanguage> {
         let filename = path.file_name().and_then(|name| name.to_str());
-        let extension = path.extension_or_hidden_file_name();
+        // `Path.extension()` returns None for files with a leading '.'
+        // and no other extension which is not the desired behavior here,
+        // as we want `.zshrc` to result in extension being `Some("zshrc")`
+        let extension = filename.and_then(|filename| filename.split('.').last());
         let path_suffixes = [extension, filename, path.to_str()];
         let empty = GlobSet::empty();
 
@@ -937,6 +940,8 @@ impl LanguageRegistry {
         binary: lsp::LanguageServerBinary,
         cx: gpui::AsyncApp,
     ) -> Option<lsp::LanguageServer> {
+        use gpui::AppContext as _;
+
         let mut state = self.state.write();
         let fake_entry = state.fake_server_entries.get_mut(&name)?;
         let (server, mut fake_server) = lsp::FakeLanguageServer::new(
@@ -953,17 +958,16 @@ impl LanguageRegistry {
         }
 
         let tx = fake_entry.tx.clone();
-        cx.background_executor()
-            .spawn(async move {
-                if fake_server
-                    .try_receive_notification::<lsp::notification::Initialized>()
-                    .await
-                    .is_some()
-                {
-                    tx.unbounded_send(fake_server.clone()).ok();
-                }
-            })
-            .detach();
+        cx.background_spawn(async move {
+            if fake_server
+                .try_receive_notification::<lsp::notification::Initialized>()
+                .await
+                .is_some()
+            {
+                tx.unbounded_send(fake_server.clone()).ok();
+            }
+        })
+        .detach();
 
         Some(server)
     }

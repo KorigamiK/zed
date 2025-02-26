@@ -1,7 +1,7 @@
 use gpui::{
     div, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, ParentElement, PromptHandle, PromptLevel, PromptResponse,
-    Refineable, Render, RenderablePromptHandle, Styled, TextStyleRefinement, Window,
+    Refineable, Render, RenderablePromptHandle, SharedString, Styled, TextStyleRefinement, Window,
 };
 use markdown::{Markdown, MarkdownStyle};
 use settings::Settings;
@@ -15,7 +15,7 @@ use workspace::ui::StyledExt;
 pub fn init(cx: &mut App) {
     cx.set_prompt_builder(fallback_prompt_renderer)
 }
-/// Use this function in conjunction with [AppContext::set_prompt_renderer] to force
+/// Use this function in conjunction with [App::set_prompt_builder] to force
 /// GPUI to always use the fallback prompt renderer.
 pub fn fallback_prompt_renderer(
     level: PromptLevel,
@@ -39,7 +39,7 @@ pub fn fallback_prompt_renderer(
                     let mut base_text_style = window.text_style();
                     base_text_style.refine(&TextStyleRefinement {
                         font_family: Some(settings.ui_font.family.clone()),
-                        font_size: Some(settings.ui_font_size.into()),
+                        font_size: Some(settings.ui_font_size(cx).into()),
                         color: Some(ui::Color::Muted.color(cx)),
                         ..Default::default()
                     });
@@ -48,7 +48,7 @@ pub fn fallback_prompt_renderer(
                         selection_background_color: { cx.theme().players().local().selection },
                         ..Default::default()
                     };
-                    Markdown::new(text.to_string(), markdown_style, None, None, window, cx)
+                    Markdown::new(SharedString::new(text), markdown_style, None, None, cx)
                 })
             }),
         }
